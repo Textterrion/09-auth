@@ -1,71 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
+import setCookieParser from "set-cookie-parser";
 import { checkSession } from "./lib/api/serverApi";
 
 const privateRoutes = ["/profile", "/notes"];
 const publicRoutes = ["/sign-in", "/sign-up"];
 
-interface CookieOptions {
-  expires?: Date;
-  maxAge?: number;
-  path?: string;
-  httpOnly?: boolean;
-  secure?: boolean;
-  sameSite?: "lax" | "strict" | "none" | boolean;
-}
-
-interface ParsedCookie {
-  name: string;
-  value: string;
-  options: CookieOptions;
-}
-
-function parseSetCookie(cookieStr: string): ParsedCookie | null {
-  const parts = cookieStr.split(";").map((p) => p.trim());
-  const nameValue = parts[0];
-  if (!nameValue) return null;
-
-  const eqIdx = nameValue.indexOf("=");
-  if (eqIdx === -1) return null;
-
-  const name = nameValue.substring(0, eqIdx);
-  const value = nameValue.substring(eqIdx + 1);
-
-  const options: CookieOptions = {};
-
-  for (let i = 1; i < parts.length; i++) {
-    const [key, ...valParts] = parts[i].split("=");
-    const lowerKey = key.toLowerCase();
-    const val = valParts.join("=");
-
-    if (lowerKey === "expires") {
-      options.expires = new Date(val);
-    } else if (lowerKey === "max-age") {
-      options.maxAge = Number(val);
-    } else if (lowerKey === "path") {
-      options.path = val;
-    } else if (lowerKey === "httponly") {
-      options.httpOnly = true;
-    } else if (lowerKey === "secure") {
-      options.secure = true;
-    } else if (lowerKey === "samesite") {
-      const lowerVal = val.toLowerCase();
-      if (lowerVal === "lax" || lowerVal === "strict" || lowerVal === "none") {
-        options.sameSite = lowerVal;
-      } else {
-        options.sameSite = lowerVal === "true";
-      }
-    }
-  }
-
-  return { name, value, options };
-}
-
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
-  const cookieStore = await cookies();
-  const accessToken = cookieStore.get("accessToken")?.value;
-  const refreshToken = cookieStore.get("refreshToken")?.value;
+
+  const accessToken = request.cookies.get("accessToken")?.value;
+  const refreshToken = request.cookies.get("refreshToken")?.value;
 
   const isPublicRoute = publicRoutes.some((route) =>
     pathname.startsWith(route),
@@ -80,33 +24,49 @@ export async function proxy(request: NextRequest) {
       const setCookie = data.headers["set-cookie"];
 
       if (setCookie) {
-        const cookieArray = Array.isArray(setCookie) ? setCookie : [setCookie];
+        let response: NextResponse;
+        if (isPublicRoute) {
+          response = NextResponse.redirect(new URL("/", request.url));
+        } else {
+          response = NextResponse.next();
+        }
 
-        for (const cookieStr of cookieArray) {
-          const parsed = parseSetCookie(cookieStr);
-          if (!parsed) continue;
+        const splitCookies = setCookieParser.splitCookiesString(setCookie);
+        const parsedCookies = setCookieParser.parse(splitCookies);
 
-          if (parsed.name === "accessToken" || parsed.name === "refreshToken") {
-            cookieStore.set(parsed.name, parsed.value, parsed.options);
+        for (const cookie of parsedCookies) {
+          if (cookie.name === "accessToken" || cookie.name === "refreshToken") {
+            let sameSite: "lax" | "strict" | "none" | boolean | undefined =
+              undefined;
+            if (cookie.sameSite) {
+              const lowerSameSite = cookie.sameSite.toLowerCase();
+              if (
+                lowerSameSite === "lax" ||
+                lowerSameSite === "strict" ||
+                lowerSameSite === "none"
+              ) {
+                sameSite = lowerSameSite;
+              }
+            }
+
+            const options = {
+              path: cookie.path,
+              domain: cookie.domain,
+              expires: cookie.expires,
+              maxAge: cookie.maxAge,
+              secure: cookie.secure,
+              httpOnly: cookie.httpOnly,
+              sameSite,
+            };
+
+            response.cookies.set(cookie.name, cookie.value, options);
           }
         }
 
-        if (isPublicRoute) {
-          return NextResponse.redirect(new URL("/", request.url), {
-            headers: {
-              Cookie: cookieStore.toString(),
-            },
-          });
-        }
-        if (isPrivateRoute) {
-          return NextResponse.next({
-            headers: {
-              Cookie: cookieStore.toString(),
-            },
-          });
-        }
+        return response;
       }
     }
+
     if (isPublicRoute) {
       return NextResponse.next();
     }
@@ -122,6 +82,8 @@ export async function proxy(request: NextRequest) {
   if (isPrivateRoute) {
     return NextResponse.next();
   }
+
+  return NextResponse.next();
 }
 
 export const config = {
